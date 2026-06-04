@@ -1,0 +1,28 @@
+# CDK
+cdk/cdk.out/
+cdk/dist/
+cdk/cdk.context.json
+
+# Dependencies
+node_modules/
+
+# Deployment outputs
+outputs.json
+cdk/outputs*.json
+
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+*.pem
+
+# macOS
+.DS_Store
+
+# Test outputs
+coverage/
+.nyc_output/
+*.log
+
+# Claude Code
+.claude/settings.local.json
