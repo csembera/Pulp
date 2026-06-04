@@ -1,0 +1,49 @@
+{
+  "name": "pulp-cdk",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1030.0",
+    "@aws-sdk/client-s3": "^3.1030.0",
+    "@aws-sdk/client-sns": "^3.1030.0",
+    "@aws-sdk/client-ssm": "^3.1030.0",
+    "@aws-sdk/s3-request-presigner": "^3.1030.0",
+    "@types/aws-lambda": "^8.10.161",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^22.0.0",
+    "aws-cdk": "^2.1118.0",
+    "aws-sdk-client-mock": "^4.1.0",
+    "esbuild": "^0.28.0",
+    "jest": "^29.7.0",
+    "source-map-support": "^0.5.21",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.5.4"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1031.0",
+    "aws-cdk-lib": "^2.200.0",
+    "constructs": "^10.3.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "roots": [
+      "<rootDir>/lambdas"
+    ],
+    "testMatch": [
+      "**/*.test.ts"
+    ],
+    "transform": {
+      "^.+\\.tsx?$": "ts-jest"
+    },
+    "setupFiles": [
+      "<rootDir>/lambdas/jest.setup.js"
+    ]
+  }
+}
