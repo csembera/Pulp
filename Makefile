@@ -73,6 +73,10 @@ deploy-frontend:
 	aws s3 cp "$$TMP" "s3://$$BUCKET/index.html" \
 	  --content-type "text/html; charset=utf-8" \
 	  --cache-control "no-cache, no-store, must-revalidate"; \
+	echo "→ aws s3 cp frontend/og-image.png s3://$$BUCKET/og-image.png"; \
+	aws s3 cp frontend/og-image.png "s3://$$BUCKET/og-image.png" \
+	  --content-type "image/png" \
+	  --cache-control "public, max-age=31536000, immutable"; \
 	echo "→ aws cloudfront create-invalidation --distribution-id $$DIST --paths /*"; \
 	aws cloudfront create-invalidation --distribution-id "$$DIST" --paths '/*' > /dev/null; \
 	echo "Done — invalidation typically propagates within a minute."

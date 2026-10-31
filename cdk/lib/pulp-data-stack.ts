@@ -4,10 +4,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaBase from 'aws-cdk-lib/aws-lambda';
-import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3n from 'aws-cdk-lib/aws-s3-notifications';
-import * as ses from 'aws-cdk-lib/aws-ses';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 
@@ -110,20 +108,9 @@ export class PulpDataStack extends cdk.Stack {
     );
 
     // ── SES sender identity ───────────────────────────────────────────────
-    // Domain identity; publicHostedZone() auto-creates the DKIM CNAMEs in Route 53.
-    // DKIM aligns with the From: domain, so DMARC passes without a custom MAIL FROM.
-    const senderZone = route53.HostedZone.fromLookup(this, 'SenderZone', {
-      domainName: SENDER_DOMAIN,
-    });
-
-    const senderIdentity = new ses.EmailIdentity(this, 'SenderDomainIdentity', {
-      identity: ses.Identity.publicHostedZone(senderZone),
-    });
-
-    new cdk.CfnOutput(this, 'SenderDomainIdentityName', {
-      value: senderIdentity.emailIdentityName,
-      description: 'SES domain identity for the verified sending domain.',
-    });
+    // The sembasolutions.com domain identity (and its DKIM records) is owned by
+    // the SembaPlatform stack (Semba-Solutions/infra), shared by every product.
+    // The user pool below sends through it by domain name (sesVerifiedDomain).
 
     // ── Cognito CustomMessage trigger ──────────────────────────────────────
     // Renders the Pulp welcome email for AdminCreateUser; other sources fall through.
@@ -170,9 +157,6 @@ export class PulpDataStack extends cdk.Stack {
       },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
-
-    // Make the SES identity dependency explicit — withSES doesn't wait on it.
-    this.userPool.node.addDependency(senderIdentity);
 
     this.userPoolClient = new cognito.UserPoolClient(this, 'UserPoolClient', {
       userPool: this.userPool,

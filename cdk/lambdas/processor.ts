@@ -1,5 +1,7 @@
 import {
   DynamoDBClient,
+  DeleteItemCommand,
+  GetItemCommand,
   UpdateItemCommand,
   PutItemCommand,
   ConditionalCheckFailedException,
@@ -241,6 +243,21 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const keyTerms = (keyTermsResult as PromiseFulfilledResult<ReturnType<typeof validateKeyTerms>>).value;
   const summary  = (summaryResult  as PromiseFulfilledResult<ReturnType<typeof validateSummary>>).value;
 
+  // Check if the user cancelled while Bedrock was running. If so, discard
+  // without writing anything — the cancelJob endpoint already marked the row.
+  const statusCheck = await dynamo.send(new GetItemCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      PK: { S: `USER#${userId}` },
+      SK: { S: `JOB#${jobId}` },
+    },
+    ProjectionExpression: '#status',
+    ExpressionAttributeNames: { '#status': 'status' },
+  }));
+  if (statusCheck.Item?.status?.S === 'cancelled') {
+    return;
+  }
+
   // All valid — write content to S3, then the metadata-only Topic row, mark the job
   // complete, and delete the source PDF. Content is written first so a visible Topic
   // row always implies its content object exists.
@@ -270,22 +287,41 @@ async function processRecord(record: SQSRecord): Promise<void> {
     },
   }));
 
-  await dynamo.send(new UpdateItemCommand({
-    TableName: TABLE_NAME,
-    Key: {
-      PK: { S: `USER#${userId}` },
-      SK: { S: `JOB#${jobId}` },
-    },
-    UpdateExpression: 'SET #status = :complete, topicId = :topicId, completedAt = :now',
-    ConditionExpression: '#status = :processing',
-    ExpressionAttributeNames: { '#status': 'status' },
-    ExpressionAttributeValues: {
-      ':complete':   { S: 'complete' },
-      ':processing': { S: 'processing' },
-      ':topicId':    { S: topicId },
-      ':now':        { S: now },
-    },
-  }));
+  // Mark the job complete. If the condition fails it means cancel raced with us
+  // after we already wrote the TOPIC row — clean up the row and S3 object so the
+  // topic doesn't appear in the user's library.
+  try {
+    await dynamo.send(new UpdateItemCommand({
+      TableName: TABLE_NAME,
+      Key: {
+        PK: { S: `USER#${userId}` },
+        SK: { S: `JOB#${jobId}` },
+      },
+      UpdateExpression: 'SET #status = :complete, topicId = :topicId, completedAt = :now',
+      ConditionExpression: '#status = :processing',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':complete':   { S: 'complete' },
+        ':processing': { S: 'processing' },
+        ':topicId':    { S: topicId },
+        ':now':        { S: now },
+      },
+    }));
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) {
+      // Job was cancelled after we wrote the TOPIC row. Remove it so it doesn't linger.
+      await dynamo.send(new DeleteItemCommand({
+        TableName: TABLE_NAME,
+        Key: {
+          PK: { S: `USER#${userId}` },
+          SK: { S: `TOPIC#${topicId}` },
+        },
+      }));
+      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: contentKey }));
+      return;
+    }
+    throw err;
+  }
 
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }

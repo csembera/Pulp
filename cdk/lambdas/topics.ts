@@ -28,10 +28,17 @@ function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
 export async function handler(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,
 ): Promise<APIGatewayProxyResultV2> {
-  const userId  = event.requestContext.authorizer.jwt.claims['sub'] as string;
-  const topicId = event.pathParameters?.topicId;
-  const method  = event.requestContext.http.method;
+  const userId = event.requestContext.authorizer.jwt.claims['sub'] as string;
+  const method = event.requestContext.http.method;
 
+  // DELETE /jobs/{jobId} — cancel an in-flight upload job
+  const jobId = event.pathParameters?.jobId;
+  if (jobId) {
+    if (method === 'DELETE') return cancelJob(userId, jobId);
+    return json(405, { message: 'Method not allowed' });
+  }
+
+  const topicId = event.pathParameters?.topicId;
   if (!topicId) return getList(userId);
 
   switch (method) {
@@ -134,17 +141,8 @@ async function renameTopic(
   return json(200, { topicId, title });
 }
 
-async function deleteTopic(userId: string, topicId: string): Promise<APIGatewayProxyResultV2> {
-  const topicResult = await dynamo.send(new GetItemCommand({
-    TableName: TABLE_NAME,
-    Key: {
-      PK: { S: `USER#${userId}` },
-      SK: { S: `TOPIC#${topicId}` },
-    },
-    ProjectionExpression: 'PK, contentKey',
-  }));
-  if (!topicResult.Item) return json(404, { message: 'Topic not found' });
-
+// Core deletion logic shared by deleteTopic and cancelJob.
+async function eraseTopicData(userId: string, topicId: string, contentKey: string | undefined): Promise<void> {
   const attemptKeys: { PK: { S: string }; SK: { S: string } }[] = [];
   let exclusiveStartKey: Record<string, { S: string }> | undefined;
   do {
@@ -183,10 +181,66 @@ async function deleteTopic(userId: string, topicId: string): Promise<APIGatewayP
   }));
 
   // Remove the S3 content last — an orphaned object on partial failure is benign.
-  const contentKey = topicResult.Item.contentKey?.S;
   if (contentKey) {
     await s3.send(new DeleteObjectCommand({ Bucket: BUCKET_NAME, Key: contentKey }));
   }
+}
 
+async function deleteTopic(userId: string, topicId: string): Promise<APIGatewayProxyResultV2> {
+  const topicResult = await dynamo.send(new GetItemCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      PK: { S: `USER#${userId}` },
+      SK: { S: `TOPIC#${topicId}` },
+    },
+    ProjectionExpression: 'PK, contentKey',
+  }));
+  if (!topicResult.Item) return json(404, { message: 'Topic not found' });
+
+  await eraseTopicData(userId, topicId, topicResult.Item.contentKey?.S);
   return json(204, null);
+}
+
+// Marks a job cancelled and removes any topic the processor already wrote.
+// topicId === jobId (the processor reuses the job UUID), so we can look it up directly.
+// Idempotent: returns 200 whether or not the job existed.
+async function cancelJob(userId: string, jobId: string): Promise<APIGatewayProxyResultV2> {
+  try {
+    await dynamo.send(new UpdateItemCommand({
+      TableName: TABLE_NAME,
+      Key: {
+        PK: { S: `USER#${userId}` },
+        SK: { S: `JOB#${jobId}` },
+      },
+      UpdateExpression: 'SET #status = :cancelled, cancelledAt = :now',
+      ConditionExpression: 'attribute_exists(PK)',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: {
+        ':cancelled': { S: 'cancelled' },
+        ':now':       { S: new Date().toISOString() },
+      },
+    }));
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') {
+      // Job expired or never existed — nothing to cancel.
+      return json(200, { cancelled: true });
+    }
+    throw err;
+  }
+
+  // If the processor already wrote the topic before this cancel arrived, delete it.
+  const topicResult = await dynamo.send(new GetItemCommand({
+    TableName: TABLE_NAME,
+    Key: {
+      PK: { S: `USER#${userId}` },
+      SK: { S: `TOPIC#${jobId}` },
+    },
+    ProjectionExpression: 'PK, contentKey',
+  }));
+
+  if (topicResult.Item) {
+    await eraseTopicData(userId, jobId, topicResult.Item.contentKey?.S);
+  }
+
+  return json(200, { cancelled: true });
 }

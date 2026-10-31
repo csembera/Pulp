@@ -36,18 +36,23 @@ for item in data.get("Items", []):
     rows.append((
         email,
         item.get("status",     {}).get("S", "-"),
+        # source separates a TICK request from a Pulp one; company is what the
+        # requester asked TICK to track. Both are absent on rows written before
+        # the join-request handler started recording them.
+        item.get("source",     {}).get("S", "-"),
+        item.get("company",    {}).get("S", "-")[:22],
         item.get("createdAt",  {}).get("S", "-"),
         item.get("approvedAt", {}).get("S", "-"),
     ))
 
-rows.sort(key=lambda r: r[2], reverse=True)
+rows.sort(key=lambda r: r[4], reverse=True)
 
-header = "EMAIL".ljust(36) + "  " + "STATUS".ljust(10) + "  " + "CREATED".ljust(20) + "  " + "APPROVED".ljust(20)
-rule   = ("-" * 36)       + "  " + ("-" * 10)          + "  " + ("-" * 20)          + "  " + ("-" * 20)
-print(header)
-print(rule)
+cols = [("EMAIL", 34), ("STATUS", 9), ("SOURCE", 10),
+        ("COMPANY", 22), ("CREATED", 20), ("APPROVED", 20)]
+print("  ".join(h.ljust(w) for h, w in cols))
+print("  ".join("-" * w for _, w in cols))
 if not rows:
     print("(no matching requests)")
-for email, status, created, approved in rows:
-    print(f"{email:<36}  {status:<10}  {created:<20}  {approved:<20}")
+for email, status, source, company, created, approved in rows:
+    print(f"{email:<34}  {status:<9}  {source:<10}  {company:<22}  {created:<20}  {approved:<20}")
 '

@@ -3,7 +3,6 @@ import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigwv2Auth from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import * as budgets from 'aws-cdk-lib/aws-budgets';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
@@ -23,15 +22,14 @@ import { PulpDataStack } from './pulp-data-stack';
 
 const APP_DOMAIN     = 'pulp.sembasolutions.com';
 const ROOT_DOMAIN    = 'sembasolutions.com';
-const LANDING_DOMAIN = ROOT_DOMAIN;
-const LANDING_WWW    = `www.${ROOT_DOMAIN}`;
 
 export interface PulpAppStackProps extends cdk.StackProps {
   dataStack: PulpDataStack;
 }
 
 /**
- * PulpAppStack — compute + edge: frontend bucket, CloudFront, WAF, API, Lambdas, alarms, budget.
+ * PulpAppStack — compute + edge: frontend bucket, CloudFront, WAF, API, Lambdas, alarms.
+ * (The account budget is not here: it belongs to the account, not to Pulp.)
  * Frontend bucket is co-located here (not PulpDataStack) — its OAC policy references the
  * distribution ARN, which would otherwise create a cross-stack cycle.
  */
@@ -118,7 +116,11 @@ export class PulpAppStack extends cdk.Stack {
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "font-src 'self' https://fonts.gstatic.com",
       "img-src 'self' data:",
-      "connect-src 'self' https://*.execute-api.us-east-1.amazonaws.com https://cognito-idp.us-east-1.amazonaws.com https://*.s3.amazonaws.com https://*.s3.us-east-1.amazonaws.com",
+      // pulp.sembasolutions.com is allowed so the TICK demo, served from the
+      // landing distribution under /tick-demo, can POST the join-request form
+      // cross-origin. It must go via CloudFront rather than execute-api direct:
+      // only CloudFront injects the x-origin-verify header the handler checks.
+      "connect-src 'self' https://pulp.sembasolutions.com https://*.execute-api.us-east-1.amazonaws.com https://cognito-idp.us-east-1.amazonaws.com https://*.s3.amazonaws.com https://*.s3.us-east-1.amazonaws.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -198,94 +200,6 @@ export class PulpAppStack extends cdk.Stack {
       target: route53.RecordTarget.fromAlias(
         new route53Targets.CloudFrontTarget(distribution),
       ),
-    });
-
-    // ── Landing site (sembasolutions.com) ─────────────────────────────────
-    // Apex + www marketing page; separate bucket/distribution from the SPA.
-    // No WAF — static HTML, no auth surface.
-    const landingBucket = new s3.Bucket(this, 'LandingBucket', {
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      versioned: false,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-
-    landingBucket.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'DenyNonTLS',
-      effect: iam.Effect.DENY,
-      principals: [new iam.AnyPrincipal()],
-      actions: ['s3:*'],
-      resources: [landingBucket.bucketArn, `${landingBucket.bucketArn}/*`],
-      conditions: { Bool: { 'aws:SecureTransport': 'false' } },
-    }));
-
-    const landingCert = new acm.Certificate(this, 'LandingCert', {
-      domainName: LANDING_DOMAIN,
-      subjectAlternativeNames: [LANDING_WWW],
-      validation: acm.CertificateValidation.fromDns(hostedZone),
-    });
-
-    // Rewrite bare paths to index.html (S3 has no directory semantics).
-    const landingIndexRewrite = new cloudfront.Function(this, 'LandingIndexRewriteFn', {
-      code: cloudfront.FunctionCode.fromInline(`
-        function handler(event) {
-          var request = event.request;
-          var uri = request.uri;
-          if (uri.endsWith('/')) {
-            request.uri += 'index.html';
-          } else if (!uri.includes('.')) {
-            request.uri += '/index.html';
-          }
-          return request;
-        }
-      `),
-    });
-
-    const landingDistribution = new cloudfront.Distribution(this, 'LandingDistribution', {
-      defaultBehavior: {
-        origin: cloudfrontOrigins.S3BucketOrigin.withOriginAccessControl(landingBucket),
-        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
-        responseHeadersPolicy: securityHeaders,
-        functionAssociations: [{
-          function: landingIndexRewrite,
-          eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
-        }],
-      },
-      defaultRootObject: 'index.html',
-      domainNames: [LANDING_DOMAIN, LANDING_WWW],
-      certificate: landingCert,
-    });
-
-    // Apex + www both A-alias the distribution (Route 53 alias works on the apex).
-    new route53.ARecord(this, 'LandingApexAliasRecord', {
-      zone: hostedZone,
-      recordName: LANDING_DOMAIN,
-      target: route53.RecordTarget.fromAlias(
-        new route53Targets.CloudFrontTarget(landingDistribution),
-      ),
-    });
-
-    new route53.ARecord(this, 'LandingWwwAliasRecord', {
-      zone: hostedZone,
-      recordName: LANDING_WWW,
-      target: route53.RecordTarget.fromAlias(
-        new route53Targets.CloudFrontTarget(landingDistribution),
-      ),
-    });
-
-    new cdk.CfnOutput(this, 'LandingBucketName', {
-      value: landingBucket.bucketName,
-      exportName: 'PulpLandingBucketName',
-    });
-
-    new cdk.CfnOutput(this, 'LandingDistributionId', {
-      value: landingDistribution.distributionId,
-      exportName: 'PulpLandingDistributionId',
-    });
-
-    new cdk.CfnOutput(this, 'LandingUrl', {
-      value: `https://${LANDING_DOMAIN}`,
-      exportName: 'PulpLandingUrl',
     });
 
     // ── JWT authorizer ─────────────────────────────────────────────────────
@@ -537,36 +451,6 @@ export class PulpAppStack extends cdk.Stack {
     });
     sesComplaintRateAlarm.addAlarmAction(alarmAction);
 
-    // ── AWS Budget: $5/month ──────────────────────────────────────────────
-    // Two thresholds: warn at 80% ($4), alert at 100% ($5).
-    new budgets.CfnBudget(this, 'MonthlyBudget', {
-      budget: {
-        budgetName: 'pulp-monthly',
-        budgetType: 'COST',
-        timeUnit: 'MONTHLY',
-        budgetLimit: { amount: 5, unit: 'USD' },
-      },
-      notificationsWithSubscribers: [
-        {
-          notification: {
-            notificationType: 'ACTUAL',
-            comparisonOperator: 'GREATER_THAN',
-            threshold: 80,
-            thresholdType: 'PERCENTAGE',
-          },
-          subscribers: [{ subscriptionType: 'SNS', address: alarmsTopic.topicArn }],
-        },
-        {
-          notification: {
-            notificationType: 'ACTUAL',
-            comparisonOperator: 'GREATER_THAN',
-            threshold: 100,
-            thresholdType: 'PERCENTAGE',
-          },
-          subscribers: [{ subscriptionType: 'SNS', address: alarmsTopic.topicArn }],
-        },
-      ],
-    });
 
     // ── upload Lambda ─────────────────────────────────────────────────────
     // POST /uploads — presigned PUT URL + pending job row. JWT (default).
@@ -611,7 +495,7 @@ export class PulpAppStack extends cdk.Stack {
       },
     });
 
-    dataStack.table.grantWriteData(processorFn);
+    dataStack.table.grantReadWriteData(processorFn);
     dataStack.uploadsBucket.grantRead(processorFn);
     dataStack.uploadsBucket.grantDelete(processorFn);
     // Write topic content JSON under topics/<userId>/<topicId>.json.
@@ -682,6 +566,11 @@ export class PulpAppStack extends cdk.Stack {
       path: '/topics/{topicId}',
       methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PATCH, apigwv2.HttpMethod.DELETE],
       integration: new apigwv2Integrations.HttpLambdaIntegration('TopicsDetailIntegration', topicsFn),
+    });
+    this.api.addRoutes({
+      path: '/jobs/{jobId}',
+      methods: [apigwv2.HttpMethod.DELETE],
+      integration: new apigwv2Integrations.HttpLambdaIntegration('JobCancelIntegration', topicsFn),
     });
 
     // ── attempts Lambda — POST + GET /topics/{topicId}/attempts ──────────
